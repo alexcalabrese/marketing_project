@@ -1,0 +1,9 @@
+data_paths:
+  base_path: "/teamspace/studios/this_studio/marketing_project/Marketing_data"
+  customers: tbl_customers.csv
+  products: tbl_products.csv
+  labelled_reviews: tbl_labelled_reviews.csv
+  orders: tbl_orders.csv
+  addresses: tbl_addresses.csv
+  customer_reviews: tbl_customer_reviews.csv
+  customer_accounts: tbl_customer_accounts.csv
