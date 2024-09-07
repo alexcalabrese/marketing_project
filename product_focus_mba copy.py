@@ -4,9 +4,15 @@ import matplotlib.pyplot as plt
 from mlxtend.frequent_patterns import apriori, association_rules
 from mlxtend.preprocessing import TransactionEncoder
 from sklearn.preprocessing import MultiLabelBinarizer
+import yaml
+import os
 
-def load_data():
-    return pd.read_csv('merged_data.csv')
+def load_data(path='merged_data.csv'):
+    
+    with open('/teamspace/studios/this_studio/marketing_project/configs.yaml', 'r') as file:
+        config = yaml.safe_load(file)
+    full_path = os.path.join(config['data_paths']['base_path'], path)
+    return pd.read_csv(full_path)
 
 def prepare_transaction_data(data):
     # Group the data by order_id and aggregate product_ids into a list

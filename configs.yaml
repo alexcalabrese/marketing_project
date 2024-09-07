@@ -7,3 +7,5 @@ data_paths:
   addresses: tbl_addresses.csv
   customer_reviews: tbl_customer_reviews.csv
   customer_accounts: tbl_customer_accounts.csv
+  cleaned_customer_reviews: cleaned_reviews.csv
+  cleaned_labelled_reviews: cleaned_labelled_reviews.csv

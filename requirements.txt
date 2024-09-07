@@ -1,0 +1,8 @@
+pyyaml
+pandas
+seaborn
+wordcloud
+pyyaml
+matplotlib
+torch
+transformers
