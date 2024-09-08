@@ -58,7 +58,7 @@ def prepare_features_no_window(data: pd.DataFrame) -> pd.DataFrame:
         'gross_price': ['sum', 'mean', 'max']  # Monetary
     }).reset_index()
     
-    customer_features.columns = ['customer_id', 'frequency', 'total_spend', 'avg_spend', 'max_spend']
+    customer_features.columns = ['customer_id', 'frequency', 'total_monthly_spend', 'avg_spend', 'max_spend']
     
     # Calculate recency
     last_purchase = data.groupby('customer_id')['purchase_datetime'].max().reset_index()
@@ -183,12 +183,17 @@ def prepare_features(data: pd.DataFrame, churn_labels: pd.DataFrame) -> pd.DataF
     """
     Prepare features for model training based on the sliding window churn labels.
 
-    Parameters:
-    data (pd.DataFrame): Original purchase data
-    churn_labels (pd.DataFrame): Churn labels from sliding window approach
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Original purchase data.
+    churn_labels : pd.DataFrame
+        Churn labels from sliding window approach.
 
-    Returns:
-    pd.DataFrame: Prepared features for each customer-window combination
+    Returns
+    -------
+    pd.DataFrame
+        Prepared features for each customer-window combination.
     """
     features = []
 
@@ -203,17 +208,24 @@ def prepare_features(data: pd.DataFrame, churn_labels: pd.DataFrame) -> pd.DataF
         # Calculate features
         customer_features = window_data.groupby('customer_id').agg({
             'purchase_datetime': 'count',  # Frequency
-            'gross_price': ['sum', 'mean', 'max']  # Monetary
+            'gross_price': ['mean', 'max']  # Monetary
         }).reset_index()
         
-        customer_features.columns = ['customer_id', 'frequency', 'total_spend', 'avg_spend', 'max_spend']
+        customer_features.columns = ['customer_id', 'frequency', 'avg_spend', 'max_spend']
         
         # Calculate recency
         last_purchase = window_data.groupby('customer_id')['purchase_datetime'].max().reset_index()
         last_purchase['recency'] = (window_end - last_purchase['purchase_datetime']).dt.days
         
+        # Calculate total monthly spend
+        window_data['month'] = window_data['purchase_datetime'].dt.to_period('M')
+        monthly_spend = window_data.groupby(['customer_id', 'month'])['gross_price'].sum().reset_index()
+        total_monthly_spend = monthly_spend.groupby('customer_id')['gross_price'].mean().reset_index()
+        total_monthly_spend.columns = ['customer_id', 'total_monthly_spend']
+        
         # Merge features
         customer_features = customer_features.merge(last_purchase[['customer_id', 'recency']], on='customer_id')
+        customer_features = customer_features.merge(total_monthly_spend, on='customer_id')
         
         # Add window information
         customer_features['window_start'] = window_start
@@ -228,7 +240,7 @@ def prepare_features(data: pd.DataFrame, churn_labels: pd.DataFrame) -> pd.DataF
     
     return final_features
 
-def train_churn_model(dataset: pd.DataFrame) -> Tuple[RandomForestClassifier, list, Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+def train_churn_model(dataset: pd.DataFrame) -> Tuple[RandomForestClassifier, list, Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], StandardScaler]:
     """
     Train a Random Forest model to predict churn.
 
@@ -238,7 +250,8 @@ def train_churn_model(dataset: pd.DataFrame) -> Tuple[RandomForestClassifier, li
     Returns:
     tuple: Trained model, feature names, and train/test split data and scaler
     """
-    features = ['recency', 'frequency', 'total_spend', 'avg_spend', 'max_spend']
+    features = ['recency', 'frequency', 'total_monthly_spend', 'avg_spend', 'max_spend']
+    
     X = dataset[features]
     y = dataset['churned']
 
@@ -256,7 +269,7 @@ def train_churn_model(dataset: pd.DataFrame) -> Tuple[RandomForestClassifier, li
 
     return model, features, (X_train_scaled, X_test_scaled, y_train, y_test), scaler
 
-def evaluate_model(model: RandomForestClassifier, X_test: np.ndarray, y_test: pd.Series) -> None:
+def evaluate_model(model: RandomForestClassifier, X_test: np.ndarray, y_test: pd.Series):
     """
     Evaluate the trained model.
 
@@ -305,15 +318,15 @@ def identify_high_value_customers(data: pd.DataFrame, model, features, scaler, t
     churn_proba = model.predict_proba(X)[:, 1]
     data['churn_probability'] = churn_proba
 
-    # Define high-value customers (e.g., top 25% by total_spend)
-    high_value_threshold = data['total_spend'].quantile(0.75)
+    # Define high-value customers (e.g., top 25% by total_monthly_spend)
+    high_value_threshold = data['total_monthly_spend'].quantile(0.75)
     
     # Identify high-value customers at risk of churning
-    high_value_at_risk = data[(data['total_spend'] >= high_value_threshold) & 
+    high_value_at_risk = data[(data['total_monthly_spend'] >= high_value_threshold) & 
                                (data['churn_probability'] > threshold)]
 
     # Scale RFM values between 0 and 1
-    rfm_scaled = (high_value_at_risk[['recency', 'total_spend', 'frequency']] - high_value_at_risk[['recency', 'total_spend', 'frequency']].min()) / (high_value_at_risk[['recency', 'total_spend', 'frequency']].max() - high_value_at_risk[['recency', 'total_spend', 'frequency']].min())
+    rfm_scaled = (high_value_at_risk[['recency', 'total_monthly_spend', 'frequency']] - high_value_at_risk[['recency', 'total_monthly_spend', 'frequency']].min()) / (high_value_at_risk[['recency', 'total_monthly_spend', 'frequency']].max() - high_value_at_risk[['recency', 'total_monthly_spend', 'frequency']].min())
 
     # Calculate weighted average of scaled RFM values
     rfm_scaled['RFM_avg'] = rfm_scaled.mean(axis=1)
@@ -327,18 +340,7 @@ def main() -> None:
     """
     Main function to execute the churn analysis workflow.
     """
-    # data = load_data()
     
-    # churn_labels = create_sliding_window_churn_label(data)
-    
-    # rfm = calculate_rfm(data)
-    # rfm = create_churn_label(rfm)
-    # features = prepare_features(rfm)
-    # model, X_test, y_test, y_train, y_test = train_churn_model(features, rfm['Churn'])
-    # evaluate_model(model, X_test, y_test)
-    # high_value_at_risk = identify_high_value_customers(features_df, rfm , model, feature_names, scaler)
-    # high_value_at_risk = identify_high_value_customers(rfm, model)
-
     print("Loading data...")
     data = load_data(sample=0.01)
     rfm = calculate_rfm(data)
@@ -350,25 +352,19 @@ def main() -> None:
     print("Preparing features...")
     # Prepare features
     features_df = prepare_features(data, churn_labels)
-    print("Training model...")
     
+    print("Training model...")
     # Train the model
-    model, feature_names, (X_train, X_test, y_train, y_test) , scaler = train_churn_model(features_df)
-    X_train = scaler.fit_transform(X_train)
-    # now predict the churn probability for the last x days
-    # create the data frame with the last x days
+    model, feature_names, (X_train, X_test, y_train, y_test), scaler = train_churn_model(features_df)
+
+    # filter the data for the last 90 days
     last_window_data = data[(data['purchase_datetime'] >= data['purchase_datetime'].max() - timedelta(days=90))]
+    
     prepared_data = prepare_features_no_window(last_window_data)
+    
     prepared_data['churn_probability'] = model.predict_proba(scaler.transform(prepared_data[feature_names]))[:, 1]
     
-    # print the results
-    print("Last 90 days churn probability:")
-    print(prepared_data)
-
-    # X_train = scaler.fit_transform(X_train)
-    # high_value_at_risk = identify_high_value_customers(features_df, model, feature_names, scaler)
-    # print("High-value customers at risk of churning:")
-    # print(high_value_at_risk[high_value_at_risk['RFM_cluster'] == 'High'])
+    print(prepared_data[prepared_data['frequency'] > 3])
 
 
 if __name__ == "__main__":
