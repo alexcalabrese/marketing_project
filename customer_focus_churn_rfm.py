@@ -15,7 +15,7 @@ from datetime import timedelta
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-def load_data(path: str = 'merged_data.csv') -> pd.DataFrame:
+def load_data(path: str = 'merged_data.csv', sample: float = None) -> pd.DataFrame:
     """
     Load data from a CSV file.
 
@@ -23,16 +23,51 @@ def load_data(path: str = 'merged_data.csv') -> pd.DataFrame:
     ----------
     path : str, optional
         Path to the CSV file, by default 'merged_data.csv'.
+    sample : float, optional
+        Sample size as a fraction of the dataset, by default None.
 
     Returns
     -------
     pd.DataFrame
         Loaded data as a DataFrame.
     """
-    with open('/teamspace/studios/this_studio/marketing_project/configs.yaml', 'r') as file:
+    with open('configs.yaml', 'r') as file:
         config = yaml.safe_load(file)
     full_path = os.path.join(config['data_paths']['base_path'], path)
-    return pd.read_csv(full_path)
+    data = pd.read_csv(full_path)
+    
+    if sample is not None:
+        data = data.sample(frac=sample, random_state=42)  # Sample the dataset
+    
+    return data
+
+def prepare_features_no_window(data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Prepare features for model training based on the sliding window churn labels.
+    
+    Parameters:
+    data (pd.DataFrame): Original purchase data
+    churn_labels (pd.DataFrame): Churn labels from sliding window approach
+    
+    Returns:
+    pd.DataFrame: Prepared features for each customer-window combination
+    """
+    # Calculate features
+    customer_features = data.groupby('customer_id').agg({
+        'purchase_datetime': 'count',  # Frequency
+        'gross_price': ['sum', 'mean', 'max']  # Monetary
+    }).reset_index()
+    
+    customer_features.columns = ['customer_id', 'frequency', 'total_spend', 'avg_spend', 'max_spend']
+    
+    # Calculate recency
+    last_purchase = data.groupby('customer_id')['purchase_datetime'].max().reset_index()
+    last_purchase['recency'] = (data['purchase_datetime'].max() - last_purchase['purchase_datetime']).dt.days
+    
+    # Merge features
+    customer_features = customer_features.merge(last_purchase[['customer_id', 'recency']], on='customer_id')
+    
+    return customer_features
 
 def calculate_rfm(data: pd.DataFrame) -> pd.DataFrame:
     """
@@ -201,7 +236,7 @@ def train_churn_model(dataset: pd.DataFrame) -> Tuple[RandomForestClassifier, li
     dataset (pd.DataFrame): Prepared features and churn labels
 
     Returns:
-    tuple: Trained model, feature names, and train/test split data
+    tuple: Trained model, feature names, and train/test split data and scaler
     """
     features = ['recency', 'frequency', 'total_spend', 'avg_spend', 'max_spend']
     X = dataset[features]
@@ -219,7 +254,7 @@ def train_churn_model(dataset: pd.DataFrame) -> Tuple[RandomForestClassifier, li
     model = RandomForestClassifier(n_estimators=100, random_state=42)
     model.fit(X_train_scaled, y_train)
 
-    return model, features, (X_train_scaled, X_test_scaled, y_train, y_test)
+    return model, features, (X_train_scaled, X_test_scaled, y_train, y_test), scaler
 
 def evaluate_model(model: RandomForestClassifier, X_test: np.ndarray, y_test: pd.Series) -> None:
     """
@@ -243,28 +278,15 @@ def evaluate_model(model: RandomForestClassifier, X_test: np.ndarray, y_test: pd
     roc_auc = roc_auc_score(y_test, y_pred_proba)
     print(f"\nROC AUC Score: {roc_auc:.4f}")
 
-    # # Feature importance
-    # feature_importance = pd.DataFrame({
-    #     'feature': model.feature_names_in_,
-    #     'importance': model.feature_importances_
-    # }).sort_values('importance', ascending=False)
-
-    # plt.figure(figsize=(10, 6))
-    # sns.barplot(x='importance', y='feature', data=feature_importance)
-    # plt.title('Feature Importance')
-    # plt.tight_layout()
-    # plt.show()
-
     return {
         'classification_report': classification_report(y_test, y_pred),
         'confusion_matrix': confusion_matrix(y_test, y_pred),
         'roc_auc': roc_auc
-        # 'feature_importance': feature_importance
     }
 
 def identify_high_value_customers(data: pd.DataFrame, model, features, scaler, threshold: float = 0.7) -> pd.DataFrame:
     """
-    Identify high-value customers at risk of churning.
+    Identify high-value customers at risk of churning and cluster them based on RFM values.
 
     Parameters:
     data (pd.DataFrame): Prepared features for customers
@@ -274,7 +296,7 @@ def identify_high_value_customers(data: pd.DataFrame, model, features, scaler, t
     threshold (float): Probability threshold to consider a customer at risk
 
     Returns:
-    pd.DataFrame: High-value customers at risk of churning
+    pd.DataFrame: High-value customers at risk of churning with RFM clusters
     """
     # Scale the features
     X = scaler.transform(data[features])
@@ -288,7 +310,16 @@ def identify_high_value_customers(data: pd.DataFrame, model, features, scaler, t
     
     # Identify high-value customers at risk of churning
     high_value_at_risk = data[(data['total_spend'] >= high_value_threshold) & 
-                              (data['churn_probability'] > threshold)]
+                               (data['churn_probability'] > threshold)]
+
+    # Scale RFM values between 0 and 1
+    rfm_scaled = (high_value_at_risk[['recency', 'total_spend', 'frequency']] - high_value_at_risk[['recency', 'total_spend', 'frequency']].min()) / (high_value_at_risk[['recency', 'total_spend', 'frequency']].max() - high_value_at_risk[['recency', 'total_spend', 'frequency']].min())
+
+    # Calculate weighted average of scaled RFM values
+    rfm_scaled['RFM_avg'] = rfm_scaled.mean(axis=1)
+
+    # Cluster customers into 3 groups based on weighted average RFM values
+    high_value_at_risk['RFM_cluster'] = pd.qcut(rfm_scaled['RFM_avg'], q=3, labels=["Low", "Medium", "High"])
 
     return high_value_at_risk.sort_values('churn_probability', ascending=False)
 
@@ -296,26 +327,49 @@ def main() -> None:
     """
     Main function to execute the churn analysis workflow.
     """
-    data = load_data()
+    # data = load_data()
     
-    churn_labels = create_sliding_window_churn_label(data)
+    # churn_labels = create_sliding_window_churn_label(data)
     
+    # rfm = calculate_rfm(data)
+    # rfm = create_churn_label(rfm)
+    # features = prepare_features(rfm)
+    # model, X_test, y_test, y_train, y_test = train_churn_model(features, rfm['Churn'])
+    # evaluate_model(model, X_test, y_test)
+    # high_value_at_risk = identify_high_value_customers(features_df, rfm , model, feature_names, scaler)
+    # high_value_at_risk = identify_high_value_customers(rfm, model)
+
+    print("Loading data...")
+    data = load_data(sample=0.01)
     rfm = calculate_rfm(data)
-    rfm = create_churn_label(rfm)
-    features = prepare_features(rfm)
-    model, X_test, y_test, y_train, y_test = train_churn_model(features, rfm['Churn'])
-    evaluate_model(model, X_test, y_test)
-    high_value_at_risk = identify_high_value_customers(rfm, model)
+
+    print("Creating sliding window churn labels...")
+    # Create sliding window churn labels
+    churn_labels = create_sliding_window_churn_label(data)
+
+    print("Preparing features...")
+    # Prepare features
+    features_df = prepare_features(data, churn_labels)
+    print("Training model...")
     
-    print("High-value customers at risk of churning:")
-    print(high_value_at_risk)
+    # Train the model
+    model, feature_names, (X_train, X_test, y_train, y_test) , scaler = train_churn_model(features_df)
+    X_train = scaler.fit_transform(X_train)
+    # now predict the churn probability for the last x days
+    # create the data frame with the last x days
+    last_window_data = data[(data['purchase_datetime'] >= data['purchase_datetime'].max() - timedelta(days=90))]
+    prepared_data = prepare_features_no_window(last_window_data)
+    prepared_data['churn_probability'] = model.predict_proba(scaler.transform(prepared_data[feature_names]))[:, 1]
     
-    plt.figure(figsize=(10, 6))
-    sns.scatterplot(data=rfm, x='recency', y='monetary', hue='Churn_Probability', size='frequency')
-    plt.title('High-Value Customers at Risk of Churning')
-    plt.xlabel('Recency (days)')
-    plt.ylabel('Monetary Value')
-    plt.show()
+    # print the results
+    print("Last 90 days churn probability:")
+    print(prepared_data)
+
+    # X_train = scaler.fit_transform(X_train)
+    # high_value_at_risk = identify_high_value_customers(features_df, model, feature_names, scaler)
+    # print("High-value customers at risk of churning:")
+    # print(high_value_at_risk[high_value_at_risk['RFM_cluster'] == 'High'])
+
 
 if __name__ == "__main__":
     main()
