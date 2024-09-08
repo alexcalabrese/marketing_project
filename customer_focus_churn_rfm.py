@@ -2,14 +2,17 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
 import yaml
 import os
-from typing import Tuple
+from typing import List, Tuple
 from datetime import timedelta
 
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
 from datetime import timedelta
 import matplotlib.pyplot as plt
@@ -240,17 +243,94 @@ def prepare_features(data: pd.DataFrame, churn_labels: pd.DataFrame) -> pd.DataF
     
     return final_features
 
-def train_churn_model(dataset: pd.DataFrame) -> Tuple[RandomForestClassifier, list, Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], StandardScaler]:
+def preprocess_data(data: pd.DataFrame, preprocessor: ColumnTransformer = None) -> Tuple[pd.DataFrame, ColumnTransformer]:
+    """
+    Preprocess the data to include additional features.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Original purchase data.
+
+    Returns
+    -------
+    pd.DataFrame
+        Preprocessed data with additional features.
+    ColumnTransformer
+        The fitted preprocessor.
+    """
+    # One-hot encode categorical features
+    categorical_features = ['product_class', 'job_type', 'region', 'loyalty_type']
+    binary_features = ['gender']
+    numerical_features = ['price_reduction', 'flag_phone_provided', 'loyatlty_status']
+
+    # Ensure all expected columns are present
+    expected_columns = categorical_features + binary_features + numerical_features + ['email_provider', 'customer_id']
+    missing_columns = [col for col in expected_columns if col not in data.columns]
+    if missing_columns:
+        raise ValueError(f"Missing columns in input data: {missing_columns}")
+
+    # Preprocess email_provider to keep top 3 and label others as 'others'
+    top_3_providers = data['email_provider'].value_counts().nlargest(3).index
+    data['email_provider'] = data['email_provider'].apply(lambda x: x if x in top_3_providers else 'others')
+
+    # Preprocessing pipelines for numerical and categorical data
+    numerical_transformer = Pipeline(steps=[
+        ('imputer', SimpleImputer(strategy='median')),
+        ('scaler', StandardScaler())
+    ])
+
+    categorical_transformer = Pipeline(steps=[
+        ('imputer', SimpleImputer(strategy='constant', fill_value='missing')),
+        ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+    ])
+
+    binary_transformer = Pipeline(steps=[
+        ('imputer', SimpleImputer(strategy='most_frequent')),
+        ('binary', OneHotEncoder(drop='if_binary', sparse_output=False))
+    ])
+
+    # Combine preprocessing steps
+    if preprocessor is None:
+        preprocessor = ColumnTransformer(
+            transformers=[
+                ('num', numerical_transformer, numerical_features),
+                ('cat', categorical_transformer, categorical_features + ['email_provider']),
+                ('bin', binary_transformer, binary_features)
+            ],
+            sparse_threshold=0
+        )
+        data_preprocessed = preprocessor.fit_transform(data)
+    else:
+        data_preprocessed = preprocessor.transform(data)
+
+    # Debug: Print the shape of the transformed data
+    print(f"Shape of transformed data: {data_preprocessed.shape}")
+    print(f"Expected number of columns: {len(preprocessor.get_feature_names_out())}")
+
+    # Convert to DataFrame
+    data_preprocessed_df = pd.DataFrame(data_preprocessed, columns=preprocessor.get_feature_names_out())
+
+    # Add the customer_id column back to the DataFrame
+    data_preprocessed_df['customer_id'] = data['customer_id'].values
+
+    return data_preprocessed_df, preprocessor
+
+def train_churn_model(dataset: pd.DataFrame, preprocessor: ColumnTransformer) -> Tuple[RandomForestClassifier, List[str], Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], StandardScaler]:
     """
     Train a Random Forest model to predict churn.
 
-    Parameters:
-    dataset (pd.DataFrame): Prepared features and churn labels
+    Parameters
+    ----------
+    dataset : pd.DataFrame
+        Prepared features and churn labels
 
-    Returns:
-    tuple: Trained model, feature names, and train/test split data and scaler
+    Returns
+    -------
+    tuple
+        Trained model, feature names, and train/test split data and scaler
     """
-    features = ['recency', 'frequency', 'total_monthly_spend', 'avg_spend', 'max_spend']
+    features = ['recency', 'frequency', 'total_monthly_spend', 'avg_spend', 'max_spend'] + list(preprocessor.get_feature_names_out())
     
     X = dataset[features]
     y = dataset['churned']
@@ -297,7 +377,7 @@ def evaluate_model(model: RandomForestClassifier, X_test: np.ndarray, y_test: pd
         'roc_auc': roc_auc
     }
 
-def identify_high_value_customers(data: pd.DataFrame, model, features, scaler, threshold: float = 0.7) -> pd.DataFrame:
+def identify_high_value_customers(data: pd.DataFrame, threshold: float = 0.7) -> pd.DataFrame:
     """
     Identify high-value customers at risk of churning and cluster them based on RFM values.
 
@@ -312,11 +392,11 @@ def identify_high_value_customers(data: pd.DataFrame, model, features, scaler, t
     pd.DataFrame: High-value customers at risk of churning with RFM clusters
     """
     # Scale the features
-    X = scaler.transform(data[features])
+    # X = scaler.transform(data[features])
 
-    # Predict churn probability
-    churn_proba = model.predict_proba(X)[:, 1]
-    data['churn_probability'] = churn_proba
+    # # Predict churn probability
+    # churn_proba = model.predict_proba(X)[:, 1]
+    # data['churn_probability'] = churn_proba
 
     # Define high-value customers (e.g., top 25% by total_monthly_spend)
     high_value_threshold = data['total_monthly_spend'].quantile(0.75)
@@ -353,18 +433,36 @@ def main() -> None:
     # Prepare features
     features_df = prepare_features(data, churn_labels)
     
+    print("Preprocessing additional features...")
+    # Preprocess additional features
+    additional_features_df, preprocessor = preprocess_data(data)
+    features_df = features_df.merge(additional_features_df, on='customer_id', how='left')
+    
     print("Training model...")
     # Train the model
-    model, feature_names, (X_train, X_test, y_train, y_test), scaler = train_churn_model(features_df)
+    model, feature_names, (X_train, X_test, y_train, y_test), scaler = train_churn_model(features_df, preprocessor)
 
     # filter the data for the last 90 days
     last_window_data = data[(data['purchase_datetime'] >= data['purchase_datetime'].max() - timedelta(days=90))]
     
-    prepared_data = prepare_features_no_window(last_window_data)
+    # Prepare features for the current data
+    last_window_features = prepare_features_no_window(last_window_data)
     
-    prepared_data['churn_probability'] = model.predict_proba(scaler.transform(prepared_data[feature_names]))[:, 1]
+    # Preprocess the last window features
+    last_window_features_preprocessed, _ = preprocess_data(last_window_data, preprocessor)
     
-    print(prepared_data[prepared_data['frequency'] > 3])
+    last_window_features_df = last_window_features_preprocessed.merge(last_window_features, on='customer_id', how='left')
+    
+    # Predict churn probabilities using the trained model
+    churn_proba_last_window = model.predict_proba(last_window_features_df[feature_names])[:, 1]
+    
+    # Add churn probabilities to the last window features DataFrame
+    last_window_features_df['churn_probability'] = churn_proba_last_window
+    
+    # Print the top 10 customers with the highest churn probability
+    top_churn_risk_customers = last_window_features_df.sort_values('churn_probability', ascending=False).head(10)
+    print("Top 10 customers with the highest churn probability:")
+    print(top_churn_risk_customers)
 
 
 if __name__ == "__main__":
