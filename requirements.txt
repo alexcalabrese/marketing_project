@@ -7,3 +7,4 @@ matplotlib
 torch
 transformers
 scikit-learn
+mlxtend

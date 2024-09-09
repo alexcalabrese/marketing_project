@@ -7,12 +7,31 @@ from sklearn.preprocessing import MultiLabelBinarizer
 import yaml
 import os
 
-def load_data(path='merged_data.csv'):
-    
-    with open('/teamspace/studios/this_studio/marketing_project/configs.yaml', 'r') as file:
+def load_data(path: str = 'merged_data.csv', sample: float = None) -> pd.DataFrame:
+    """
+    Load data from a CSV file.
+
+    Parameters
+    ----------
+    path : str, optional
+        Path to the CSV file, by default 'merged_data.csv'.
+    sample : float, optional
+        Sample size as a fraction of the dataset, by default None.
+
+    Returns
+    -------
+    pd.DataFrame
+        Loaded data as a DataFrame.
+    """
+    with open('configs.yaml', 'r') as file:
         config = yaml.safe_load(file)
     full_path = os.path.join(config['data_paths']['base_path'], path)
-    return pd.read_csv(full_path)
+    data = pd.read_csv(full_path)
+    
+    if sample is not None:
+        data = data.sample(frac=sample, random_state=42)  # Sample the dataset
+    
+    return data
 
 def prepare_transaction_data(data):
     # Group the data by order_id and aggregate product_ids into a list
@@ -36,6 +55,9 @@ def perform_mba(transactions, min_support=0.01, min_threshold=0.7):
     transactions.columns = [str(col) for col in transactions.columns]
     
     frequent_itemsets = apriori(transactions, min_support=min_support, use_colnames=True)
+    
+    print(f"Frequent itemsets found: {len(frequent_itemsets)}")
+
     rules = association_rules(frequent_itemsets, metric="lift", min_threshold=min_threshold)
     return rules
 
@@ -73,7 +95,7 @@ def main():
     transactions = prepare_transaction_data(data)
     
     print("Performing Market Basket Analysis...")
-    rules = perform_mba(transactions)
+    rules = perform_mba(transactions, min_support=0.003, min_threshold=0.3)
     
     print("Identifying cross-selling opportunities...")
     cross_sell_opportunities = identify_cross_selling_opportunities(rules)
@@ -81,8 +103,8 @@ def main():
     print("\nTop cross-selling opportunities:")
     print(cross_sell_opportunities[['antecedents', 'consequents', 'lift', 'confidence']])
     
-    print("\nVisualizing network...")
-    visualize_network(rules)
+    # print("\nVisualizing network...")
+    # visualize_network(rules)
 
 if __name__ == "__main__":
     main()
