@@ -15,8 +15,27 @@ import os
 import pandas as pd
 import yaml
 import torch
+import logging
+from sklearn.preprocessing import LabelEncoder
 
-def load_data(path='merged_data.csv'):
+def load_data(path='merged_data.csv', sample=1):
+    """
+    Load and merge data from CSV files, with an option to sample a percentage of the data.
+
+    Parameters
+    ----------
+    path : str, optional
+        Path to the merged data CSV file, by default 'merged_data.csv'.
+    sample : float, optional
+        Percentage of data to sample (0.0 to 1.0), by default 1 (100%).
+
+    Returns
+    -------
+    tuple
+        A tuple containing two pandas DataFrames:
+        - merged_data: The merged customer and review data.
+        - df_labelled_reviews: The labelled reviews data.
+    """
     with open('configs.yaml', 'r') as file:
          config = yaml.safe_load(file)
     file_paths = config['data_paths']
@@ -42,6 +61,11 @@ def load_data(path='merged_data.csv'):
     # Merge the loaded data with reviews
     merged_data = pd.merge(merged_data, df_customer_reviews, on='customer_id', how='left')
     
+    # Sample the data if sample < 1
+    if sample < 1:
+        merged_data = merged_data.sample(frac=sample, random_state=42)
+        df_labelled_reviews = df_labelled_reviews.sample(frac=sample, random_state=42)
+    
     return merged_data, df_labelled_reviews
 
 def preprocess_text(text):
@@ -60,22 +84,149 @@ def train_sentiment_model(data):
     
     return model, vectorizer, X_test, y_test
 
-def train_sentiment_model_transformer(data, logging=True):
+def custom_train_test_split(inputs, labels, test_size=0.2, random_state=42):
+    """
+    Perform a custom train-test split on the dataset.
+
+    Parameters
+    ----------
+    inputs : dict
+        Dictionary containing 'input_ids' and 'attention_mask' tensors.
+    labels : torch.Tensor
+        Tensor of encoded labels.
+    test_size : float, optional
+        Proportion of the dataset to include in the test split, by default 0.2.
+    random_state : int, optional
+        Random state for reproducibility, by default 42.
+
+    Returns
+    -------
+    dict
+        Dictionary containing train and test splits for inputs and labels.
+    """
+    dataset_size = len(labels)
+    indices = list(range(dataset_size))
+    
+    # Set random seed for reproducibility
+    torch.manual_seed(random_state)
+    
+    # Shuffle indices
+    torch.randperm(dataset_size, out=torch.LongTensor(indices))
+    
+    # Calculate split index
+    split_idx = int(np.floor(test_size * dataset_size))
+    
+    # Split indices
+    train_indices, test_indices = indices[split_idx:], indices[:split_idx]
+    
+    # Create train and test splits
+    X_train = {
+        'input_ids': inputs['input_ids'][train_indices],
+        'attention_mask': inputs['attention_mask'][train_indices]
+    }
+    X_test = {
+        'input_ids': inputs['input_ids'][test_indices],
+        'attention_mask': inputs['attention_mask'][test_indices]
+    }
+    y_train = labels[train_indices]
+    y_test = labels[test_indices]
+    
+    return X_train, X_test, y_train, y_test
+
+def train_sentiment_model_transformer(data, logging_level=logging.INFO):
+    """
+    Train a sentiment model using DistilBERT transformer.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        DataFrame containing 'review_text' and 'sentiment_label' columns.
+    logging_level : int, optional
+        Logging level (e.g., logging.INFO, logging.DEBUG), by default logging.INFO.
+
+    Returns
+    -------
+    model : DistilBertForSequenceClassification
+        Trained DistilBERT model.
+    tokenizer : DistilBertTokenizer
+        DistilBERT tokenizer.
+    X_test : dict
+        Test set inputs.
+    y_test : np.ndarray
+        Test set labels.
+    """
+    logging.basicConfig(level=logging_level)
+    logger = logging.getLogger(__name__)
+
+    logger.info("Initializing DistilBERT tokenizer and model...")
     tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
-    model = DistilBertForSequenceClassification.from_pretrained('distilbert-base-uncased', num_labels=2)
+    model = DistilBertForSequenceClassification.from_pretrained('distilbert-base-uncased', num_labels=3)
 
-    # Tokenize the inputs
+    logger.info(f"Data shape: {data.shape}")
+    logger.info(f"Columns: {data.columns}")
+
+    # Ensure 'review_text' and 'sentiment_label' columns exist
+    required_columns = ['review_text', 'sentiment_label']
+    if not all(col in data.columns for col in required_columns):
+        raise ValueError(f"Data must contain columns: {required_columns}")
+
+    # Remove rows with NaN values
+    data = data.dropna(subset=required_columns)
+    logger.info(f"Shape after dropping NaN values: {data.shape}")
+
+    logger.info("Tokenizing inputs...")
     inputs = tokenizer(data['review_text'].tolist(), padding=True, truncation=True, return_tensors='pt')
-    labels = data['sentiment_label'].values
+    
+    logger.info("Encoding labels...")
+    label_encoder = LabelEncoder()
+    labels = torch.tensor(label_encoder.fit_transform(data['sentiment_label']))
 
-    # Train/test split
-    X_train, X_test, y_train, y_test = train_test_split(inputs, labels, test_size=0.2, random_state=42)
+    logger.info(f"Input size: {len(inputs['input_ids'])}, Labels size: {len(labels)}")
 
-    # Prepare datasets for Trainer (assuming appropriate padding and tensor transformation)
-    train_dataset = torch.utils.data.TensorDataset(X_train['input_ids'], X_train['attention_mask'], y_train)
-    eval_dataset = torch.utils.data.TensorDataset(X_test['input_ids'], X_test['attention_mask'], y_test)
+    logger.info("Performing train/test split...")
+    # X_train, X_test, y_train, y_test = train_test_split(
+    #     {'input_ids': inputs['input_ids'], 'attention_mask': inputs['attention_mask']},
+    #     labels,
+    #     test_size=0.2,
+    #     random_state=42
+    # )
 
-    # Training arguments
+    logger.info("Performing custom train/test split...")
+
+    # Perform custom train/test split
+    X_train, X_test, y_train, y_test = custom_train_test_split(
+        {'input_ids': inputs['input_ids'], 'attention_mask': inputs['attention_mask']},
+        labels,
+        test_size=0.2,
+        random_state=42
+    )
+
+    logger.info(f"Train set size: {len(y_train)}, Test set size: {len(y_test)}")
+    
+    logger.info("Preparing datasets for Trainer...")
+    class Dataset(torch.utils.data.Dataset):
+        def __init__(self, encodings, labels):
+            self.encodings = encodings
+            self.labels = labels
+
+        def __getitem__(self, idx):
+            item = {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
+            item['labels'] = torch.tensor(self.labels[idx])
+            return item
+
+        def __len__(self):
+            return len(self.labels)
+
+    train_dataset = Dataset(
+        {'input_ids': X_train['input_ids'], 'attention_mask': X_train['attention_mask']},
+        y_train
+    )
+    eval_dataset = Dataset(
+        {'input_ids': X_test['input_ids'], 'attention_mask': X_test['attention_mask']},
+        y_test
+    )
+
+    logger.info("Setting up training arguments...")
     training_args = TrainingArguments(
         output_dir='./results',
         num_train_epochs=3,
@@ -87,19 +238,20 @@ def train_sentiment_model_transformer(data, logging=True):
         logging_steps=10,
         evaluation_strategy="epoch"
     )
-    if logging:
-        print("[LOG] Training started...")
+
+    logger.info("Initializing Trainer...")
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset
     )
+
+    logger.info("Starting training...")
     trainer.train()
 
+    logger.info("Training completed.")
     return model, tokenizer, X_test, y_test
-
-
 
 def evaluate_model(model, X_test, y_test):
     y_pred = model.predict(X_test)
@@ -168,13 +320,19 @@ def generate_wordclouds(data, config_path='configs.yaml'):
     create_wordcloud(promoter_text, 'Promoter Word Cloud')
 
 def main():
-    df_customer_and_review, df_labelled_reviews = load_data()
+    df_customer_and_review, df_labelled_reviews = load_data(sample=0.01)
+    
+    # Train the ML model
     # model, vectorizer, X_test, y_test = train_sentiment_model(df_labelled_reviews)
     # evaluate_model(model, X_test, y_test)
-    print("\nTransformers model training:")
-    model, vectorizer, X_test, y_test = train_sentiment_model_transformer(df_labelled_reviews)
-    evaluate_model(model, X_test, y_test)
     
+    # Train the transformer pretrained model
+    print("\nTransformers model training:")
+    model, tokenizer, X_test, y_test = train_sentiment_model_transformer(df_labelled_reviews, logging_level=logging.INFO)
+    
+
+    evaluate_model(model, X_test, y_test)
+    vectorizer = tokenizer
     df_customer_and_review = identify_detractors_promoters(df_customer_and_review, model, vectorizer)
     analyze_customer_segments(df_customer_and_review)
     generate_wordclouds(df_customer_and_review)
