@@ -1,4 +1,5 @@
 import pandas as pd
+from sklearn.linear_model import LogisticRegression
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -349,6 +350,43 @@ def train_churn_model(dataset: pd.DataFrame, preprocessor: ColumnTransformer) ->
 
     return model, features, (X_train_scaled, X_test_scaled, y_train, y_test), scaler
 
+def train_logistic_regression_model(dataset: pd.DataFrame, preprocessor: ColumnTransformer) -> Tuple[LogisticRegression, List[str], Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], StandardScaler]:
+    """
+    Train a Logistic Regression model to predict churn.
+
+    Parameters
+    ----------
+    dataset : pd.DataFrame
+        Prepared features and churn labels
+
+    Returns
+    -------
+    tuple
+        Trained model, feature names, and train/test split data and scaler
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    features = ['recency', 'frequency', 'total_monthly_spend', 'avg_spend', 'max_spend'] + list(preprocessor.get_feature_names_out())
+    
+    X = dataset[features]
+    y = dataset['churned']
+
+    # Split the data
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # Scale the features
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+
+    # Train the model
+    model = LogisticRegression(random_state=42, max_iter=1000)
+    model.fit(X_train_scaled, y_train)
+
+    return model, features, (X_train_scaled, X_test_scaled, y_train, y_test), scaler
+
+
+
 def evaluate_model(model: RandomForestClassifier, X_test: np.ndarray, y_test: pd.Series):
     """
     Evaluate the trained model.
@@ -403,7 +441,7 @@ def identify_high_value_customers(data: pd.DataFrame, threshold: float = 0.7) ->
     
     # Identify high-value customers at risk of churning
     high_value_at_risk = data[(data['total_monthly_spend'] >= high_value_threshold) & 
-                               (data['churn_probability'] > threshold)]
+                               (data['churn_probability_rf'] > threshold)]
 
     # Scale RFM values between 0 and 1
     rfm_scaled = (high_value_at_risk[['recency', 'total_monthly_spend', 'frequency']] - high_value_at_risk[['recency', 'total_monthly_spend', 'frequency']].min()) / (high_value_at_risk[['recency', 'total_monthly_spend', 'frequency']].max() - high_value_at_risk[['recency', 'total_monthly_spend', 'frequency']].min())
@@ -414,7 +452,7 @@ def identify_high_value_customers(data: pd.DataFrame, threshold: float = 0.7) ->
     # Cluster customers into 3 groups based on weighted average RFM values
     high_value_at_risk['RFM_cluster'] = pd.qcut(rfm_scaled['RFM_avg'], q=3, labels=["Low", "Medium", "High"])
 
-    return high_value_at_risk.sort_values('churn_probability', ascending=False)
+    return high_value_at_risk.sort_values('churn_probability_rf', ascending=False)
 
 def main() -> None:
     """
